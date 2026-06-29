@@ -4,9 +4,11 @@ One-line installer for the **VibeMaxx host daemon** — run your agent/terminal 
 always-on VPS so they survive your local machine sleeping or shutting off. Your VibeMaxx desktop
 app connects to the host over WebSocket ("Connected mode").
 
-This repo contains **only the installer**. The daemon itself ships as the public
-[`vibemaxx-host`](https://www.npmjs.com/package/vibemaxx-host) npm package; the script installs
-it and wires up a hardened systemd service.
+This repo contains **only the installer**. The daemon ships as a self-contained **release
+tarball** (the built daemon + its native modules + a bundled Node runtime) attached to this
+repo's [Releases](https://github.com/elliotskise/vibemaxx-host/releases). The installer downloads
+it and wires up a hardened systemd service — your server **never runs npm and never compiles
+anything**.
 
 ## Install
 
@@ -19,6 +21,13 @@ curl -fsSL https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/inst
 # Public, with automatic TLS — point your domain's DNS at this box FIRST:
 curl -fsSL https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh \
   | sudo bash -s -- --domain host.example.com
+```
+
+Prefer to read it before running? Download, then run:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh
+sudo bash install.sh
 ```
 
 The script prints the **connect URL + token** at the end. Paste them into the desktop app under
@@ -35,15 +44,21 @@ ssh -N -L 8765:127.0.0.1:8765 <user>@<your-vps>
 
 ## What it does
 
-1. Installs Node.js 20 + build tools (if missing).
-2. Creates a dedicated **non-root** `vibemaxx` user and a `~/projects` working dir.
-3. `npm install -g vibemaxx-host` (native modules built for the box's Node ABI).
-4. Generates a bearer token into `/etc/vibemaxx/host.env` (mode 0600), reused on re-runs.
-5. Installs a **hardened** systemd unit (loopback-bound, `ProtectSystem=strict`,
+1. Installs prerequisites (`curl`, `tar`, `git`, `ca-certificates`) — **no compiler, no npm**.
+2. Downloads `vibemaxx-host-<arch>.tar.gz` for your CPU from this repo's Releases and verifies
+   its checksum.
+3. Extracts it to `/opt/vibemaxx-host` (the previous release is kept at `/opt/vibemaxx-host.old`
+   for rollback).
+4. Creates a dedicated **non-root** `vibemaxx` user and a `~/projects` working dir.
+5. Generates a bearer token into `/etc/vibemaxx/host.env` (mode 0600), reused on re-runs.
+6. Installs a **hardened** systemd unit (loopback-bound, `ProtectSystem=strict`,
    `ProtectHome=read-only`, `NoNewPrivileges`) and starts it.
-6. With `--domain`, installs Caddy for automatic-TLS `wss://`.
+7. With `--domain`, installs Caddy for automatic-TLS `wss://`.
 
-It is **idempotent** — re-run it to update to the latest daemon; the token is preserved.
+It is **idempotent** — re-run it to update to the latest release; the token and data are preserved.
+
+> **Supported architectures:** `linux-x64` (almost every VPS) and `linux-arm64`. The release
+> bundles its own Node runtime, so there is no system-Node version to match.
 
 ## Options
 
@@ -54,7 +69,7 @@ It is **idempotent** — re-run it to update to the latest daemon; the token is 
 | `--token <tok>` | Use this bearer token instead of generating one. |
 | `--port <n>` | Loopback port (default `8765`). |
 | `--user <name>` | Service user (default `vibemaxx`). |
-| `--version <spec>` | npm version/tag to install (default `latest`). |
+| `--version <tag>` | Release tag to install (default `latest`). |
 | `--uninstall` | Stop + remove the service (user-data kept). |
 | `--purge` | With `--uninstall`, also delete the data dir + env file. |
 
