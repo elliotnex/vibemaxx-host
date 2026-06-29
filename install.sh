@@ -112,7 +112,11 @@ case "$(uname -m)" in
   *)              die "Unsupported CPU architecture: $(uname -m). Open an issue for a build." ;;
 esac
 ASSET="vibemaxx-host-${PLATFORM}.tar.gz"
-if [ "${VERSION}" = "latest" ]; then
+# VIBEMAXX_RELEASE_BASE_URL overrides where the tarball is fetched from (a mirror, an internal
+# artifact store, a file:// path for air-gapped/offline installs, or local testing).
+if [ -n "${VIBEMAXX_RELEASE_BASE_URL:-}" ]; then
+  BASE_URL="${VIBEMAXX_RELEASE_BASE_URL%/}"
+elif [ "${VERSION}" = "latest" ]; then
   BASE_URL="https://github.com/${REPO_SLUG}/releases/latest/download"
 else
   BASE_URL="https://github.com/${REPO_SLUG}/releases/download/${VERSION}"
@@ -171,6 +175,10 @@ rm -rf "${INSTALL_DIR}.old"
 mv "${STAGING}" "${INSTALL_DIR}"
 trap 'rm -rf "${TMP}" 2>/dev/null || true' EXIT   # STAGING is now INSTALL_DIR; don't delete it
 chown -R root:root "${INSTALL_DIR}"
+# mktemp -d makes the staging dir 0700; the non-root service user must be able to read +
+# traverse the install tree and execute the bundled node. a+rX = read for files, traverse
+# for dirs, and execute for anything already executable (the node binary, spawn-helper).
+chmod -R a+rX "${INSTALL_DIR}"
 # node-pty's spawn-helper / the bundled node must stay executable.
 find "${INSTALL_DIR}" -name spawn-helper -exec chmod +x {} \; 2>/dev/null || true
 [ -x "${INSTALL_DIR}/node/bin/node" ] || chmod +x "${INSTALL_DIR}/node/bin/node" 2>/dev/null || true
