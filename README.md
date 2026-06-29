@@ -15,7 +15,10 @@ anything**.
 On a fresh **Debian/Ubuntu** VPS, as root:
 
 ```bash
-# Loopback only — reach it over an SSH tunnel (simplest, most secure for personal use):
+# RECOMMENDED — private + encrypted via Tailscale (no public exposure, works from anywhere):
+curl -fsSL https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh | sudo bash -s -- --tailscale
+
+# Loopback only — reach it over an SSH tunnel:
 curl -fsSL https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh | sudo bash
 
 # Public, with automatic TLS — point your domain's DNS at this box FIRST:
@@ -32,6 +35,22 @@ sudo bash install.sh
 
 The script prints the **connect URL + token** at the end. Paste them into the desktop app under
 **Settings → Connections → Host connection**.
+
+### Connecting over Tailscale (recommended)
+
+[Tailscale](https://tailscale.com) is a WireGuard-based mesh VPN: it links your laptop/phone and
+this VPS into one private, encrypted network **over the public internet** — they do **not** need
+to be on the same physical network. With `--tailscale`, the daemon binds **only** to the VPS's
+tailnet address, so it's never exposed to the internet; only your own devices can reach it.
+
+1. The installer sets up Tailscale on the VPS. Without `--tailscale-authkey` it prints a login URL
+   — open it once to authorize the box. For unattended installs, pass an
+   [auth key](https://login.tailscale.com/admin/settings/keys): `--tailscale-authkey tskey-...`.
+2. On the machine you'll connect **from**, install Tailscale and sign into the **same** account:
+   <https://tailscale.com/download>.
+3. In the app → **Settings → Connections**, use the printed URL
+   (`ws://<vps>.<your-tailnet>.ts.net:8765`) + token. Traffic is WireGuard-encrypted; no ports are
+   public.
 
 ### If you went loopback-only
 
@@ -64,6 +83,9 @@ It is **idempotent** — re-run it to update to the latest release; the token an
 
 | Flag | Description |
 | --- | --- |
+| `--tailscale` | Install Tailscale + bind the daemon to your private tailnet (no public exposure). |
+| `--tailscale-authkey <k>` | Tailscale auth key (`tskey-...`) for non-interactive setup. |
+| `--tailscale-hostname <n>` | Tailnet hostname for this VPS (default: the machine's hostname). |
 | `--domain <host>` | Domain pointed at this VPS; installs Caddy for automatic-TLS `wss://`. |
 | `--github-token <tok>` | GitHub token for authenticated git push/pull from the host. |
 | `--token <tok>` | Use this bearer token instead of generating one. |

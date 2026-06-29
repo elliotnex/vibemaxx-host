@@ -3,21 +3,25 @@
 # VibeMaxx host — one-line VPS installer (vendored release, no npm on your server).
 #
 # Installs the always-on `vibemaxx-host` daemon (agent/terminal sessions over WebSocket) on a
-# Debian/Ubuntu box, as a hardened non-root systemd service bound to loopback. Your VibeMaxx
-# desktop app then connects to it so sessions survive your local machine sleeping/shutting off.
+# Debian/Ubuntu box, as a hardened non-root systemd service. Your VibeMaxx desktop app then
+# connects to it so sessions survive your local machine sleeping/shutting off.
 #
 # It downloads a self-contained release tarball (the daemon + its native modules, and a bundled
 # Node runtime) from this repo's GitHub Releases — so the server never compiles anything and
 # never talks to the npm registry.
 #
-# Quick start (loopback only — reach it over an SSH tunnel):
+# Private, encrypted access via Tailscale (RECOMMENDED — no public exposure, works from anywhere):
+#   curl -fsSL https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh | sudo bash -s -- --tailscale
+#   (add --tailscale-authkey tskey-... for fully non-interactive setup)
+#
+# Loopback only — reach it over an SSH tunnel:
 #   curl -fsSL https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh | sudo bash
 #
 # Or download first, read it, then run:
 #   curl -fsSLO https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh
 #   sudo bash install.sh
 #
-# With automatic-TLS wss:// (point the domain's DNS at this box FIRST):
+# Public, with automatic-TLS wss:// (point the domain's DNS at this box FIRST):
 #   curl -fsSL https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh \
 #     | sudo bash -s -- --domain host.example.com
 #
@@ -25,15 +29,18 @@
 # Uninstall:  sudo bash install.sh --uninstall
 #
 # Options (pass after `bash -s --`):
-#   --domain <host>        Domain pointed at this VPS; installs Caddy for automatic-TLS wss://.
-#   --github-token <tok>   GitHub token for authenticated git push/pull from the host (optional).
-#   --token <tok>          Use this bearer token instead of generating one.
-#   --port <n>             Loopback port (default 8765).
-#   --user <name>          Service user (default vibemaxx).
-#   --version <tag>        Release tag to install (default: latest).
-#   --uninstall            Stop + remove the service (user-data kept).
-#   --purge                With --uninstall, also delete the data dir and env file.
-#   -h, --help             Show this help.
+#   --tailscale              Install Tailscale + bind the daemon to your private tailnet (no public exposure).
+#   --tailscale-authkey <k>  Tailscale auth key (tskey-...) for non-interactive setup.
+#   --tailscale-hostname <n> Tailnet hostname for this VPS (default: the machine's hostname).
+#   --domain <host>          Domain pointed at this VPS; installs Caddy for automatic-TLS wss://.
+#   --github-token <tok>     GitHub token for authenticated git push/pull from the host (optional).
+#   --token <tok>            Use this bearer token instead of generating one.
+#   --port <n>               Port the daemon listens on (default 8765).
+#   --user <name>            Service user (default vibemaxx).
+#   --version <tag>          Release tag to install (default: latest).
+#   --uninstall              Stop + remove the service (user-data kept).
+#   --purge                  With --uninstall, also delete the data dir and env file.
+#   -h, --help               Show this help.
 
 set -euo pipefail
 
@@ -54,6 +61,9 @@ APP_USER="vibemaxx"
 VERSION="latest"
 DO_UNINSTALL=0
 DO_PURGE=0
+USE_TAILSCALE=0
+TS_AUTHKEY=""
+TS_HOSTNAME=""
 
 say()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 ok()   { printf '\033[1;32m✓ %s\033[0m\n' "$*"; }
@@ -62,16 +72,19 @@ die()  { printf '\033[1;31mx  %s\033[0m\n' "$*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --domain)        DOMAIN="${2:-}"; shift 2 ;;
-    --github-token)  GITHUB_TOKEN="${2:-}"; shift 2 ;;
-    --token)         TOKEN="${2:-}"; shift 2 ;;
-    --port)          PORT="${2:-}"; shift 2 ;;
-    --user)          APP_USER="${2:-}"; shift 2 ;;
-    --version)       VERSION="${2:-}"; shift 2 ;;
-    --uninstall)     DO_UNINSTALL=1; shift ;;
-    --purge)         DO_PURGE=1; shift ;;
-    -h|--help)       grep -E '^#( |$)' "$0" 2>/dev/null | sed 's/^#\s\{0,1\}//'; exit 0 ;;
-    *)               die "Unknown option: $1 (try --help)" ;;
+    --tailscale)           USE_TAILSCALE=1; shift ;;
+    --tailscale-authkey)   TS_AUTHKEY="${2:-}"; shift 2 ;;
+    --tailscale-hostname)  TS_HOSTNAME="${2:-}"; shift 2 ;;
+    --domain)              DOMAIN="${2:-}"; shift 2 ;;
+    --github-token)        GITHUB_TOKEN="${2:-}"; shift 2 ;;
+    --token)               TOKEN="${2:-}"; shift 2 ;;
+    --port)                PORT="${2:-}"; shift 2 ;;
+    --user)                APP_USER="${2:-}"; shift 2 ;;
+    --version)             VERSION="${2:-}"; shift 2 ;;
+    --uninstall)           DO_UNINSTALL=1; shift ;;
+    --purge)               DO_PURGE=1; shift ;;
+    -h|--help)             grep -E '^#( |$)' "$0" 2>/dev/null | sed 's/^#\s\{0,1\}//'; exit 0 ;;
+    *)                     die "Unknown option: $1 (try --help)" ;;
   esac
 done
 
@@ -194,6 +207,47 @@ else
 fi
 install -d -o "${APP_USER}" -g "${APP_USER}" "${DATA_DIR}" "${PROJECTS_DIR}"
 
+# --- 6b. Tailscale: private, encrypted access with no public exposure (recommended) ---------
+TS_UNIT_AFTER=""
+TS_UNIT_WANTS=""
+TS_HOST=""
+TS_IP=""
+if [ "${USE_TAILSCALE}" -eq 1 ]; then
+  if [ -n "${DOMAIN}" ]; then
+    warn "--tailscale and --domain are mutually exclusive (Tailscale keeps the daemon private; Caddy makes it public). Using Tailscale; ignoring --domain."
+    DOMAIN=""
+  fi
+  say "Setting up Tailscale"
+  if ! command -v tailscale >/dev/null 2>&1; then
+    curl -fsSL https://tailscale.com/install.sh | sh
+  fi
+  if ! tailscale ip -4 >/dev/null 2>&1; then
+    UP_ARGS=""
+    [ -n "${TS_HOSTNAME}" ] && UP_ARGS="--hostname=${TS_HOSTNAME}"
+    if [ -n "${TS_AUTHKEY}" ]; then
+      tailscale up --authkey "${TS_AUTHKEY}" ${UP_ARGS} || die "tailscale up failed (check the auth key)."
+    else
+      warn "Tailscale must authenticate this VPS. Open the login URL printed below in a browser to authorize it; setup continues automatically once you do."
+      tailscale up ${UP_ARGS} || die "tailscale up failed / was not authorized."
+    fi
+  else
+    say "Tailscale is already up"
+  fi
+  TS_IP="$(tailscale ip -4 2>/dev/null | head -n1)"
+  [ -n "${TS_IP}" ] || die "Could not determine this VPS's Tailscale IP (is 'tailscale up' authorized?)."
+  # MagicDNS name for a friendlier connect URL (falls back to the tailnet IP).
+  TS_HOST="$(tailscale status --json 2>/dev/null \
+    | grep -oE '"DNSName"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n1 \
+    | sed -E 's/.*:[[:space:]]*"([^"]+)".*/\1/' | sed 's/\.$//')"
+  [ -n "${TS_HOST}" ] || TS_HOST="${TS_IP}"
+  # Bind the daemon ONLY to the tailnet interface — never the public internet. Tailscale
+  # WireGuard-encrypts the traffic, and only devices on your tailnet can even reach it.
+  BIND="${TS_IP}"
+  TS_UNIT_AFTER=" tailscaled.service"
+  TS_UNIT_WANTS="Wants=tailscaled.service"
+  ok "Tailscale up — this VPS is ${TS_HOST} (${TS_IP}) on your tailnet"
+fi
+
 # --- 7. token + env file --------------------------------------------------------------------
 install -d -m 750 "${ENV_DIR}"
 if [ -z "${TOKEN}" ] && [ -f "${ENV_FILE}" ]; then
@@ -217,7 +271,8 @@ say "Installing systemd service ${SERVICE}"
 cat > "/etc/systemd/system/${SERVICE}.service" <<UNIT
 [Unit]
 Description=VibeMaxx host daemon (agent sessions over WebSocket)
-After=network.target
+After=network.target${TS_UNIT_AFTER}
+${TS_UNIT_WANTS}
 
 [Service]
 Type=simple
@@ -243,8 +298,12 @@ systemctl daemon-reload
 systemctl enable "${SERVICE}" >/dev/null
 systemctl restart "${SERVICE}"
 
-# --- 9. Caddy (optional TLS) ----------------------------------------------------------------
-PUBLIC_URL="ws://${BIND}:${PORT}"
+# --- 9. connect URL + optional Caddy (public TLS) -------------------------------------------
+if [ "${USE_TAILSCALE}" -eq 1 ]; then
+  PUBLIC_URL="ws://${TS_HOST}:${PORT}"
+else
+  PUBLIC_URL="ws://${BIND}:${PORT}"
+fi
 if [ -n "${DOMAIN}" ]; then
   if ! command -v caddy >/dev/null; then
     say "Installing Caddy"
@@ -288,15 +347,24 @@ $(ok "VibeMaxx host is set up.")
 
 SUMMARY
 
-if [ -z "${DOMAIN}" ]; then
+if [ "${USE_TAILSCALE}" -eq 1 ]; then
   cat <<NOTE
-$(warn "No --domain set — the daemon is loopback-only (no TLS, not reachable from the internet).")
-   Reach it by either:
-     - re-running with --domain your.domain  for automatic-TLS wss://, or
+$(ok "Private access via Tailscale — the daemon listens only on your tailnet (${TS_IP}), never the public internet.")
+   On the machine you'll connect FROM (laptop, later your phone):
+     1. Install Tailscale:  https://tailscale.com/download
+     2. Sign in to the SAME Tailscale account / tailnet as this VPS.
+     3. App → Settings → Connections → use the URL + token above.
+   Traffic is WireGuard-encrypted end-to-end; no ports are exposed to the internet.
+
+NOTE
+elif [ -z "${DOMAIN}" ]; then
+  cat <<NOTE
+$(warn "Loopback-only (no TLS, not reachable from the internet). For the easiest secure setup, re-run with --tailscale.")
+   Otherwise reach it by either:
      - an SSH tunnel from your laptop:
          ssh -N -L ${PORT}:127.0.0.1:${PORT} <user>@<this-vps>
        then connect the app to  ws://127.0.0.1:${PORT}
-     - or a Tailscale/WireGuard private address.
+     - or re-run with --domain your.domain  for automatic-TLS wss://.
 
 NOTE
 fi
