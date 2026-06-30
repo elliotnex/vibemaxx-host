@@ -239,13 +239,14 @@ if [ "${DO_UNINSTALL}" -eq 1 ]; then
 fi
 
 # --- agent-only fast path: add agents to an existing install without re-downloading ---------
-# Triggered when ONLY agent flags are given and the daemon is already installed AND its unit
-# already carries the agent PATH/prefix env (i.e. it was installed by this newer installer).
-# Skips the release download + service rewrite so live sessions aren't disrupted. If the unit
-# predates the agent env, we fall through to the full flow so the unit gets rewritten.
+# Triggered when ONLY agent flags are given and the daemon is already installed AND its unit is
+# fully current: it carries the agent PATH/prefix env AND the writable-home ReadWritePaths (so
+# agents can both install and run). Skips the release download + service rewrite so live sessions
+# aren't disrupted. If the unit predates EITHER, we fall through to the full flow so it's rewritten.
 if [ "${WANT_AGENTS}" -eq 1 ] \
   && [ -f "/etc/systemd/system/${SERVICE}.service" ] && [ -d "${INSTALL_DIR}" ] \
   && grep -q 'NPM_CONFIG_PREFIX' "/etc/systemd/system/${SERVICE}.service" \
+  && grep -qE "^ReadWritePaths=.* ${APP_HOME}\$" "/etc/systemd/system/${SERVICE}.service" \
   && [ "${USE_TAILSCALE}" -eq 0 ] && [ -z "${DOMAIN}" ] && [ "${VERSION}" = "latest" ] && [ -z "${TOKEN}" ]; then
   id -u "${APP_USER}" >/dev/null 2>&1 \
     || die "Service user '${APP_USER}' not found — run the installer once without --install-agent first."
