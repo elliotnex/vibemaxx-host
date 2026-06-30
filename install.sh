@@ -114,15 +114,17 @@ command -v apt-get >/dev/null || die "This installer targets Debian/Ubuntu (apt-
 
 # --- agent install helpers ------------------------------------------------------------------
 # Agent CLIs (Linux installers) the desktop app offers, by key -> "binary|command". Mirrors
-# the app's runtimePresets so --install-agent matches what the Agents tab shows.
+# the app's runtimePresets so --install-agent matches what the Agents tab shows. Shell installers
+# are DOWNLOADED then run as a file (not `curl | bash`) so they aren't fed their own script on
+# stdin; run_as_user runs them in a writable temp dir with /dev/null stdin.
 agent_spec() {
   case "$1" in
     codex)                 echo "codex|npm install -g @openai/codex" ;;
     claude-code | claude)  echo "claude|npm install -g @anthropic-ai/claude-code" ;;
-    grok | grok-build)     echo "grok|curl -fsSL https://x.ai/cli/install.sh | bash" ;;
-    antigravity | agy)     echo "agy|curl -fsSL https://antigravity.google/cli/install.sh | bash" ;;
-    opencode)              echo "opencode|curl -fsSL https://opencode.ai/install | bash" ;;
-    cursor | cursor-agent) echo "cursor-agent|curl https://cursor.com/install -fsS | bash" ;;
+    grok | grok-build)     echo "grok|curl -fsSL https://x.ai/cli/install.sh -o vm-install.sh && bash vm-install.sh" ;;
+    antigravity | agy)     echo "agy|curl -fsSL https://antigravity.google/cli/install.sh -o vm-install.sh && bash vm-install.sh" ;;
+    opencode)              echo "opencode|curl -fsSL https://opencode.ai/install -o vm-install.sh && bash vm-install.sh" ;;
+    cursor | cursor-agent) echo "cursor-agent|curl -fsSL https://cursor.com/install -o vm-install.sh && bash vm-install.sh" ;;
     *) return 1 ;;
   esac
 }
@@ -156,13 +158,23 @@ RC
   done
 }
 
-# Run a command AS the service user with the agent PATH/prefix wired (nologin account -> runuser).
+# Run a command AS the service user, from a FRESH writable temp dir, with stdin from /dev/null
+# (nologin account -> runuser). Why the temp cwd + </dev/null: many vendor installers (a) write
+# into the current directory — which the service user can't if cwd is /root or the install tree
+# — and (b) misbehave when their stdin is a pipe (`curl | bash` leaves the script itself on
+# stdin, so a prompt reads garbage). Running installers as downloaded FILES (see agent_spec) in
+# a temp cwd with /dev/null stdin makes them behave non-interactively.
 run_as_user() {
+  local workdir status created=1
+  workdir="$(runuser -u "${APP_USER}" -- mktemp -d 2>/dev/null || true)"
+  [ -n "${workdir}" ] || { workdir="${APP_HOME}"; created=0; }
   runuser -u "${APP_USER}" -- env \
     HOME="${APP_HOME}" \
     NPM_CONFIG_PREFIX="${NPM_PREFIX}" \
     PATH="${AGENT_BIN}:${APP_HOME}/.local/bin:${INSTALL_DIR}/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    bash -lc "$1"
+    bash -lc "cd '${workdir}' && { $1; }" </dev/null && status=0 || status=$?
+  [ "${created}" -eq 1 ] && runuser -u "${APP_USER}" -- rm -rf "${workdir}" 2>/dev/null || true
+  return "${status}"
 }
 
 install_one_agent() {
