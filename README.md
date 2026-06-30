@@ -94,8 +94,9 @@ also works (in Connected mode it runs the Linux installer on the host).
 5. Generates a bearer token into `/etc/vibemaxx/host.env` (mode 0600), reused on re-runs.
 6. Prepares a writable npm prefix (`~/.npm-global`) + agent dirs for the `vibemaxx` user so
    agent CLIs can be installed without root.
-7. Installs a **hardened** systemd unit (loopback-bound, `ProtectSystem=strict`,
-   `ProtectHome=read-only`, `NoNewPrivileges`, with the agent dirs as `ReadWritePaths`) and starts it.
+7. Installs a **hardened** systemd unit (`ProtectSystem=strict`, `NoNewPrivileges`, non-root,
+   and `ProtectHome=read-only` for `/root` + other users' homes — the service user's *own* home
+   stays writable via `ReadWritePaths` so agents can install and persist config/auth) and starts it.
 8. With `--install-agent` (etc.), installs the requested agent CLIs; with `--domain`, installs
    Caddy for automatic-TLS `wss://`.
 

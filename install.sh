@@ -442,9 +442,12 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-# Writable holes through ProtectHome: data + projects, plus the agent install/cache/config
-# dirs so \`npm install -g <agent>\` and agent auth/config writes succeed.
-ReadWritePaths=${DATA_DIR} ${PROJECTS_DIR} ${NPM_PREFIX} ${APP_HOME}/.npm ${APP_HOME}/.config ${APP_HOME}/.cache ${APP_HOME}/.local
+# The whole service-user home is writable: agent CLIs install to, and read/write config, auth,
+# and caches all over \$HOME (~/.local, ~/.config, ~/.npm-global, ~/.<tool>, ~/.claude.json, …),
+# and whitelisting each agent's dirs is a losing game. ProtectHome still shields /root and any
+# OTHER users' homes; ProtectSystem=strict still shields the OS. A leaked token already grants
+# code execution as this user, so a writable own-home does not widen the blast radius.
+ReadWritePaths=${DATA_DIR} ${PROJECTS_DIR} ${APP_HOME}
 
 [Install]
 WantedBy=multi-user.target
