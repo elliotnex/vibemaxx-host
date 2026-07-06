@@ -6,7 +6,7 @@ app connects to the host over WebSocket ("Connected mode").
 
 This repo contains **only the installer**. The daemon ships as a self-contained **release
 tarball** (the built daemon + its native modules + a bundled Node runtime) attached to this
-repo's [Releases](https://github.com/elliotskise/vibemaxx-host/releases). The installer downloads
+repo's [Releases](https://github.com/elliotnex/vibemaxx-host/releases). The installer downloads
 it and wires up a hardened systemd service — your server **runs no compiler**, and only pulls in
 npm if you opt to install agent CLIs (see [Installing agents](#installing-agents-on-the-host)).
 
@@ -16,20 +16,20 @@ On a fresh **Debian/Ubuntu** VPS, as root:
 
 ```bash
 # RECOMMENDED — private + encrypted via Tailscale (no public exposure, works from anywhere):
-curl -fsSL https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh | sudo bash -s -- --tailscale
+curl -fsSL https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/install.sh | sudo bash -s -- --tailscale
 
 # Loopback only — reach it over an SSH tunnel:
-curl -fsSL https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/install.sh | sudo bash
 
 # Public, with automatic TLS — point your domain's DNS at this box FIRST:
-curl -fsSL https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/install.sh \
   | sudo bash -s -- --domain host.example.com
 ```
 
 Prefer to read it before running? Download, then run:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh
+curl -fsSLO https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/install.sh
 sudo bash install.sh
 ```
 
@@ -70,7 +70,7 @@ hand you a PowerShell `irm …` one-liner that can't run on the Linux box. Two w
 
 ```bash
 # 1. With a fresh install (or alongside --tailscale):
-curl -fsSL https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/install.sh \
   | sudo bash -s -- --tailscale --install-agent claude-code --install-agent codex
 
 # 2. Against an existing install — just adds the agents, no re-download, no restart:

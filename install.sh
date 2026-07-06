@@ -11,23 +11,23 @@
 # never talks to the npm registry.
 #
 # Private, encrypted access via Tailscale (RECOMMENDED — no public exposure, works from anywhere):
-#   curl -fsSL https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh | sudo bash -s -- --tailscale
+#   curl -fsSL https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/install.sh | sudo bash -s -- --tailscale
 #   (add --tailscale-authkey tskey-... for fully non-interactive setup)
 #
 # Loopback only — reach it over an SSH tunnel:
-#   curl -fsSL https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/install.sh | sudo bash
 #
 # Or download first, read it, then run:
-#   curl -fsSLO https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh
+#   curl -fsSLO https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/install.sh
 #   sudo bash install.sh
 #
 # Public, with automatic-TLS wss:// (point the domain's DNS at this box FIRST):
-#   curl -fsSL https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh \
+#   curl -fsSL https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/install.sh \
 #     | sudo bash -s -- --domain host.example.com
 #
 # Install agent CLIs on the box (Linux installers, regardless of YOUR machine's OS). Combine
 # with a fresh install, or run against an existing one to just add agents (no re-download):
-#   curl -fsSL https://raw.githubusercontent.com/elliotskise/vibemaxx-host/main/install.sh \
+#   curl -fsSL https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/install.sh \
 #     | sudo bash -s -- --tailscale --install-agent claude-code
 #   sudo bash install.sh --install-agent codex --install-agent grok
 #
@@ -54,7 +54,7 @@
 set -euo pipefail
 
 # --- constants ------------------------------------------------------------------------------
-REPO_SLUG="elliotskise/vibemaxx-host"
+REPO_SLUG="elliotnex/vibemaxx-host"
 INSTALL_DIR="/opt/vibemaxx-host"
 SERVICE="vibemaxx-host"
 ENV_DIR="/etc/vibemaxx"
