@@ -7,8 +7,11 @@ app connects to the host over WebSocket ("Connected mode").
 This repo contains **only the installer**. The daemon ships as a self-contained **release
 tarball** (the built daemon + its native modules + a bundled Node runtime) attached to this
 repo's [Releases](https://github.com/elliotnex/vibemaxx-host/releases). The installer downloads
-it and wires up a hardened systemd service — your server **runs no compiler**, and only pulls in
-npm if you opt to install agent CLIs (see [Installing agents](#installing-agents-on-the-host)).
+it and wires up a systemd service — your server **runs no compiler**, and only pulls in npm if
+you opt to install agent CLIs (see [Installing agents](#installing-agents-on-the-host)).
+
+Already installed and hitting permission errors inside sessions? See
+[Agent access on the box](#agent-access-on-the-box) — one script unlocks an existing install.
 
 ## Install
 
@@ -94,10 +97,10 @@ also works (in Connected mode it runs the Linux installer on the host).
 5. Generates a bearer token into `/etc/vibemaxx/host.env` (mode 0600), reused on re-runs.
 6. Prepares a writable npm prefix (`~/.npm-global`) + agent dirs for the `vibemaxx` user so
    agent CLIs can be installed without root.
-7. Installs a **hardened** systemd unit (`ProtectSystem=strict`, `NoNewPrivileges`, non-root,
-   and `ProtectHome=read-only` for `/root` + other users' homes — the service user's *own* home
-   stays writable via `ReadWritePaths` so agents can install and persist config/auth) and starts it.
-8. With `--install-agent` (etc.), installs the requested agent CLIs; with `--domain`, installs
+7. Installs the systemd unit and starts it.
+8. Gives agent sessions **full access on the box** (see below): no systemd sandboxing on the
+   daemon, passwordless `sudo` for the `vibemaxx` user, and Codex's own sandbox turned off.
+9. With `--install-agent` (etc.), installs the requested agent CLIs; with `--domain`, installs
    Caddy for automatic-TLS `wss://`.
 
 It is **idempotent** — re-run it to update to the latest release; the token and data are preserved.
@@ -120,6 +123,8 @@ It is **idempotent** — re-run it to update to the latest release; the token an
 | `--token <tok>` | Use this bearer token instead of generating one. |
 | `--port <n>` | Loopback port (default `8765`). |
 | `--user <name>` | Service user (default `vibemaxx`). |
+| `--no-agent-sudo` | Don't grant the service user passwordless `sudo`. Agents keep full rights as that user but can't `apt install` or write outside `$HOME`. |
+| `--harden` | Contain the daemon with systemd sandboxing (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`) and skip the sudo grant. Agents inherit it — expect permission errors in sessions. |
 | `--version <tag>` | Release tag to install (default `latest`). |
 | `--uninstall` | Stop + remove the service (user-data kept). |
 | `--purge` | With `--uninstall`, also delete the data dir + env file. |
@@ -133,13 +138,48 @@ systemctl restart vibemaxx-host     # restart
 curl http://127.0.0.1:8765/healthz  # -> ok
 ```
 
+## Agent access on the box
+
+**Agent sessions are children of the daemon**, so anything that confines the *service* confines
+every *agent* — that is where "permission denied" inside a session comes from. Two layers:
+
+- **systemd.** `NoNewPrivileges=true` makes `sudo` fail with *"the 'no new privileges' flag is
+  set, which prevents sudo from running as root"* (no sudoers entry can override it);
+  `ProtectSystem=strict` makes everything outside `ReadWritePaths` read-only (`EROFS` on `/etc`,
+  `/usr/local`, `/srv`, and repos checked out off `$HOME`); `PrivateTmp` hides the agent's `/tmp`
+  from your own SSH session.
+- **The agent CLI itself.** Codex on Linux defaults to `sandbox_mode = "workspace-write"` — a
+  Landlock + seccomp jail that confines writes to the session cwd and blocks network egress,
+  independent of systemd.
+
+Running agents is the point of this daemon, so the installer's default is **unconfined**: a unit
+with no sandbox directives, `/etc/sudoers.d/vibemaxx-agents` (`NOPASSWD: ALL`), a real login shell
+plus `docker` group membership for the service user, and `~/.codex/config.toml` set to
+`sandbox_mode = "danger-full-access"`. Containment lives at the account and network level instead:
+a dedicated non-root user, a private bind, and a bearer token.
+
+Use `--no-agent-sudo` to keep agents at that user's own rights, or `--harden` to trade capability
+for systemd containment.
+
+**Already installed?** Installs from before this was the default leave agents confined. Unlock one
+in place — no re-download, and the systemd drop-in it writes survives future `install.sh` runs:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/full-access.sh | sudo bash
+
+# or, after downloading it:
+sudo bash full-access.sh              # unlock (restarts the daemon — live sessions end)
+sudo bash full-access.sh --no-restart # stage it; applies on the next restart
+sudo bash full-access.sh --revert     # put the containment back
+```
+
 ## Security — read before exposing publicly
 
-The daemon can **spawn arbitrary processes and read/write files** as the `vibemaxx` user — a
-leaked token is a shell on your VPS. Treat the token like an SSH key. Never expose plaintext
-`ws://` to the internet: use the SSH tunnel or the `--domain` TLS path. The service runs non-root
-with systemd hardening, but that is *containment*, not a sandbox; ideally run it on a box with
-limited egress.
+The daemon can **spawn arbitrary processes and read/write files** as the `vibemaxx` user, and by
+default that user can `sudo` — so a leaked token is **root on your VPS**. Treat the token like an
+SSH key. Never expose plaintext `ws://` to the internet: use `--tailscale`, an SSH tunnel, or the
+`--domain` TLS path. Run it on a box dedicated to this and treat the whole box as the sandbox; if
+the box is shared with anything else, install with `--no-agent-sudo` or `--harden`.
 
 ## License
 

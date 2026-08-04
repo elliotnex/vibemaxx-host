@@ -46,6 +46,11 @@
 #   --token <tok>            Use this bearer token instead of generating one.
 #   --port <n>               Port the daemon listens on (default 8765).
 #   --user <name>            Service user (default vibemaxx).
+#   --no-agent-sudo          Don't grant the service user passwordless sudo. Agents keep full
+#                            rights as that user but can't apt-install or write outside $HOME.
+#   --harden                 Contain the daemon with systemd sandboxing (NoNewPrivileges,
+#                            ProtectSystem=strict, ProtectHome, PrivateTmp) and skip the sudo
+#                            grant. Agents inherit it, so expect permission errors in sessions.
 #   --version <tag>          Release tag to install (default: latest).
 #   --uninstall              Stop + remove the service (user-data kept).
 #   --purge                  With --uninstall, also delete the data dir and env file.
@@ -59,6 +64,10 @@ INSTALL_DIR="/opt/vibemaxx-host"
 SERVICE="vibemaxx-host"
 ENV_DIR="/etc/vibemaxx"
 ENV_FILE="${ENV_DIR}/host.env"
+SUDOERS_FILE="/etc/sudoers.d/vibemaxx-agents"
+# Bumped whenever the generated unit changes shape; the agent-only fast path below uses it to
+# tell a current unit from one written by an older installer.
+UNIT_REV=2
 
 # --- defaults / flags -----------------------------------------------------------------------
 DOMAIN=""
@@ -70,6 +79,8 @@ APP_USER="vibemaxx"
 VERSION="latest"
 DO_UNINSTALL=0
 DO_PURGE=0
+AGENT_SUDO=1
+HARDEN=0
 USE_TAILSCALE=0
 TS_AUTHKEY=""
 TS_HOSTNAME=""
@@ -95,6 +106,8 @@ while [ $# -gt 0 ]; do
     --token)               TOKEN="${2:-}"; shift 2 ;;
     --port)                PORT="${2:-}"; shift 2 ;;
     --user)                APP_USER="${2:-}"; shift 2 ;;
+    --no-agent-sudo)       AGENT_SUDO=0; shift ;;
+    --harden)              HARDEN=1; shift ;;
     --version)             VERSION="${2:-}"; shift 2 ;;
     --uninstall)           DO_UNINSTALL=1; shift ;;
     --purge)               DO_PURGE=1; shift ;;
@@ -108,6 +121,9 @@ DATA_DIR="${APP_HOME}/.vibemaxx-host"
 PROJECTS_DIR="${APP_HOME}/projects"
 NPM_PREFIX="${APP_HOME}/.npm-global"
 AGENT_BIN="${NPM_PREFIX}/bin"
+# Hardening and agent sudo are mutually exclusive: NoNewPrivileges makes sudo fail regardless
+# of sudoers ("the 'no new privileges' flag is set, which prevents sudo from running as root").
+[ "${HARDEN}" -eq 1 ] && AGENT_SUDO=0
 
 [ "$(id -u)" -eq 0 ] || die "Run as root:  curl -fsSL <url> | sudo bash"
 command -v apt-get >/dev/null || die "This installer targets Debian/Ubuntu (apt-get not found)."
@@ -226,6 +242,9 @@ if [ "${DO_UNINSTALL}" -eq 1 ]; then
   say "Removing the ${SERVICE} service"
   systemctl disable --now "${SERVICE}" 2>/dev/null || true
   rm -f "/etc/systemd/system/${SERVICE}.service"
+  rm -rf "/etc/systemd/system/${SERVICE}.service.d"
+  # The sudo grant exists only for this daemon's agent sessions — take it with us.
+  rm -f "${SUDOERS_FILE}"
   systemctl daemon-reload 2>/dev/null || true
   rm -rf "${INSTALL_DIR}" "${INSTALL_DIR}.old"
   if [ "${DO_PURGE}" -eq 1 ]; then
@@ -240,13 +259,14 @@ fi
 
 # --- agent-only fast path: add agents to an existing install without re-downloading ---------
 # Triggered when ONLY agent flags are given and the daemon is already installed AND its unit is
-# fully current: it carries the agent PATH/prefix env AND the writable-home ReadWritePaths (so
-# agents can both install and run). Skips the release download + service rewrite so live sessions
-# aren't disrupted. If the unit predates EITHER, we fall through to the full flow so it's rewritten.
+# fully current: it carries the agent PATH/prefix env AND this installer's unit revision (which
+# governs the access posture agents run under). Skips the release download + service rewrite so
+# live sessions aren't disrupted. An older unit falls through to the full flow to be rewritten.
 if [ "${WANT_AGENTS}" -eq 1 ] \
   && [ -f "/etc/systemd/system/${SERVICE}.service" ] && [ -d "${INSTALL_DIR}" ] \
   && grep -q 'NPM_CONFIG_PREFIX' "/etc/systemd/system/${SERVICE}.service" \
-  && grep -qE "^ReadWritePaths=.* ${APP_HOME}\$" "/etc/systemd/system/${SERVICE}.service" \
+  && grep -q "# vibemaxx-unit-rev=${UNIT_REV}\$" "/etc/systemd/system/${SERVICE}.service" \
+  && [ "${HARDEN}" -eq 0 ] && [ "${AGENT_SUDO}" -eq 1 ] \
   && [ "${USE_TAILSCALE}" -eq 0 ] && [ -z "${DOMAIN}" ] && [ "${VERSION}" = "latest" ] && [ -z "${TOKEN}" ]; then
   id -u "${APP_USER}" >/dev/null 2>&1 \
     || die "Service user '${APP_USER}' not found — run the installer once without --install-agent first."
@@ -346,17 +366,62 @@ find "${INSTALL_DIR}" -name spawn-helper -exec chmod +x {} \; 2>/dev/null || tru
 DAEMON_MAIN="${INSTALL_DIR}/host-dist/host/index.js"
 
 # --- 6. service user + dirs -----------------------------------------------------------------
+# A real login shell (not nologin): agent sessions run interactive bash, `sudo -i` / `su -` need
+# a valid shell, and login-shell tooling misbehaves without one. The account has no password, so
+# it still isn't directly loginable.
 if id -u "${APP_USER}" >/dev/null 2>&1; then
   say "User ${APP_USER} already exists"
+  CURRENT_SHELL="$(getent passwd "${APP_USER}" | cut -d: -f7 || true)"
+  case "${CURRENT_SHELL}" in
+    */nologin | */false | "")
+      say "Giving ${APP_USER} a login shell (was ${CURRENT_SHELL:-none})"
+      usermod -s /bin/bash "${APP_USER}"
+      ;;
+  esac
 else
   say "Creating non-root user ${APP_USER}"
-  useradd --system --create-home --home-dir "${APP_HOME}" --shell /usr/sbin/nologin "${APP_USER}"
+  useradd --system --create-home --home-dir "${APP_HOME}" --shell /bin/bash "${APP_USER}"
 fi
 install -d -o "${APP_USER}" -g "${APP_USER}" "${DATA_DIR}" "${PROJECTS_DIR}"
 
-# Writable npm prefix + agent dirs so agent CLIs install/run without root under ProtectHome.
+# Writable npm prefix + agent dirs so agent CLIs install and run without root.
 say "Preparing agent install environment (${NPM_PREFIX})"
 setup_npm_env
+
+# --- 6a. agent sudo --------------------------------------------------------------------------
+# Agents routinely need root on their own box: apt-get install a toolchain, write /usr/local,
+# open a port, restart a service. Without this they hit "user is not in the sudoers file".
+# visudo -c validates the file before it is installed, so a bad grant can't lock sudo out.
+if [ "${AGENT_SUDO}" -eq 1 ]; then
+  say "Granting passwordless sudo to ${APP_USER} (agents can act as root on this box)"
+  TMP_SUDOERS="$(mktemp)"
+  cat > "${TMP_SUDOERS}" <<SUDOERS
+# Installed by the VibeMaxx host installer — agent sessions run as ${APP_USER} and need root
+# for package installs, service management, and writes outside \$HOME.
+# Remove this file (or re-run the installer with --no-agent-sudo) to keep agents user-level.
+${APP_USER} ALL=(ALL) NOPASSWD: ALL
+SUDOERS
+  if visudo -cqf "${TMP_SUDOERS}"; then
+    install -m 440 -o root -g root "${TMP_SUDOERS}" "${SUDOERS_FILE}"
+  else
+    warn "Generated sudoers file failed validation — skipping (agents stay at user-level rights)."
+  fi
+  rm -f "${TMP_SUDOERS}"
+else
+  rm -f "${SUDOERS_FILE}"
+  if [ "${HARDEN}" -eq 1 ]; then
+    say "Skipping the sudoers entry (--harden — NoNewPrivileges blocks sudo anyway)"
+  else
+    say "Skipping the sudoers entry (--no-agent-sudo — agents stay at user-level rights)"
+  fi
+fi
+
+# Docker, when present, is the other common "permission denied" for agents. Group membership is
+# read at daemon start, so the restart below applies it.
+if getent group docker >/dev/null 2>&1 && [ "${HARDEN}" -eq 0 ] \
+  && ! id -nG "${APP_USER}" | tr ' ' '\n' | grep -qx docker; then
+  usermod -aG docker "${APP_USER}" && say "Added ${APP_USER} to the docker group"
+fi
 
 # --- 6b. Tailscale: private, encrypted access with no public exposure (recommended) ---------
 TS_UNIT_AFTER=""
@@ -418,6 +483,46 @@ say "Writing ${ENV_FILE}"
 chmod 600 "${ENV_FILE}"
 
 # --- 8. systemd unit ------------------------------------------------------------------------
+# Access posture. Agent PTYs are children of this daemon, so anything systemd applies to the
+# service is inherited by every agent and surfaces as a permission error inside a session:
+#   NoNewPrivileges=true  -> sudo dies with "the 'no new privileges' flag is set, which prevents
+#                            sudo from running as root" (Codex reports it as a no-new-privileges
+#                            restriction), and no sudoers entry can override it.
+#   ProtectSystem=strict  -> every path outside ReadWritePaths is read-only: EROFS on /etc,
+#                            /usr/local, /srv, /var, and any repo checked out off $HOME.
+#   ProtectHome=read-only -> other users' homes read-only; the service user's own home needs an
+#                            explicit ReadWritePaths escape hatch.
+#   PrivateTmp=true       -> the agent's /tmp is invisible to your own SSH session.
+# Running agents is the point of this daemon, so the default is unconfined; containment lives at
+# the account and network level (dedicated non-root user, loopback/tailnet bind, bearer token).
+if [ "${HARDEN}" -eq 1 ]; then
+  HARDENING_BLOCK="$(cat <<HARD
+
+# Hardening (--harden) — contains the daemon AND every agent it spawns. Expect permission
+# errors inside sessions; that is the trade being made here.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=${DATA_DIR} ${PROJECTS_DIR} ${APP_HOME}
+HARD
+)"
+  warn "--harden: agents will hit permission errors for sudo, /etc, /usr/local, and any path"
+  warn "outside ${APP_HOME}."
+else
+  HARDENING_BLOCK="$(cat <<HARD
+
+# No systemd sandbox directives on purpose — they would be inherited by every agent PTY and
+# show up as permission errors inside sessions. Re-run the installer with --harden to contain.
+HARD
+)"
+fi
+
+# A drop-in from full-access.sh would override what we write here; the generated unit is
+# authoritative, so retire it.
+rm -f "/etc/systemd/system/${SERVICE}.service.d/10-vibemaxx-full-access.conf"
+rmdir "/etc/systemd/system/${SERVICE}.service.d" 2>/dev/null || true
+
 say "Installing systemd service ${SERVICE}"
 cat > "/etc/systemd/system/${SERVICE}.service" <<UNIT
 [Unit]
@@ -437,26 +542,51 @@ Environment=PATH=${AGENT_BIN}:${APP_HOME}/.local/bin:${INSTALL_DIR}/node/bin:/us
 ExecStart=${NODE_BIN} ${DAEMON_MAIN}
 Restart=always
 RestartSec=2
-
-# Hardening — the daemon can spawn arbitrary processes, so contain it.
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=read-only
-# The whole service-user home is writable: agent CLIs install to, and read/write config, auth,
-# and caches all over \$HOME (~/.local, ~/.config, ~/.npm-global, ~/.<tool>, ~/.claude.json, …),
-# and whitelisting each agent's dirs is a losing game. ProtectHome still shields /root and any
-# OTHER users' homes; ProtectSystem=strict still shields the OS. A leaked token already grants
-# code execution as this user, so a writable own-home does not widen the blast radius.
-ReadWritePaths=${DATA_DIR} ${PROJECTS_DIR} ${APP_HOME}
+${HARDENING_BLOCK}
 
 [Install]
 WantedBy=multi-user.target
+# vibemaxx-unit-rev=${UNIT_REV}
 UNIT
 
 systemctl daemon-reload
 systemctl enable "${SERVICE}" >/dev/null
 systemctl restart "${SERVICE}"
+
+# --- 8a. agent CLI sandboxes -----------------------------------------------------------------
+# systemd is only half the story: some agent CLIs sandbox THEMSELVES. Codex on Linux defaults to
+# sandbox_mode="workspace-write" — a Landlock + seccomp jail that sets PR_SET_NO_NEW_PRIVS,
+# confines writes to the session cwd, and blocks network egress for the commands it runs. On a
+# VPS the box IS the sandbox, so turn it off. (The desktop app's "Dangerous mode" toggle passes
+# --yolo per launch; this makes the host behave the same way when that toggle is off.)
+if [ "${HARDEN}" -eq 0 ]; then
+  CODEX_CONFIG="${APP_HOME}/.codex/config.toml"
+  say "Disabling the Codex CLI sandbox in ${CODEX_CONFIG}"
+  install -d -o "${APP_USER}" -g "${APP_USER}" "${APP_HOME}/.codex"
+  if [ ! -f "${CODEX_CONFIG}" ]; then
+    cat > "${CODEX_CONFIG}" <<'CODEX'
+# Written by the VibeMaxx host installer. This box is the sandbox: the agent runs as a dedicated
+# non-root user on a machine dedicated to it, so Codex's own Landlock/seccomp jail only blocks
+# legitimate work (writes outside the cwd, network access, sudo).
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+CODEX
+    chown "${APP_USER}:${APP_USER}" "${CODEX_CONFIG}"
+  elif ! grep -qE '^[[:space:]]*sandbox_mode[[:space:]]*=[[:space:]]*"danger-full-access"' "${CODEX_CONFIG}"; then
+    cp -a "${CODEX_CONFIG}" "${CODEX_CONFIG}.vibemaxx.bak"
+    # TOML top-level keys must precede any [table], so drop the old lines and prepend ours.
+    TMP_CODEX="$(mktemp)"
+    {
+      echo '# Rewritten by the VibeMaxx host installer (previous file: config.toml.vibemaxx.bak).'
+      echo 'approval_policy = "never"'
+      echo 'sandbox_mode = "danger-full-access"'
+      grep -vE '^[[:space:]]*(approval_policy|sandbox_mode)[[:space:]]*=' "${CODEX_CONFIG}"
+    } > "${TMP_CODEX}"
+    install -m 600 -o "${APP_USER}" -g "${APP_USER}" "${TMP_CODEX}" "${CODEX_CONFIG}"
+    rm -f "${TMP_CODEX}"
+    say "Backed up the previous Codex config to ${CODEX_CONFIG}.vibemaxx.bak"
+  fi
+fi
 
 # --- 8b. agent CLIs (only when requested) ---------------------------------------------------
 if [ "${WANT_AGENTS}" -eq 1 ]; then
@@ -496,6 +626,13 @@ fi
 sleep 1
 STATUS="$(systemctl is-active "${SERVICE}" || true)"
 HEALTH="$(curl -fsS "http://${BIND}:${PORT}/healthz" 2>/dev/null || echo 'unreachable')"
+if [ "${HARDEN}" -eq 1 ]; then
+  ACCESS="contained (--harden) — no sudo, writes limited to ${APP_HOME}"
+elif [ -f "${SUDOERS_FILE}" ]; then
+  ACCESS="full — unconfined unit + passwordless sudo as ${APP_USER}"
+else
+  ACCESS="user-level — unconfined unit, no sudo (--no-agent-sudo)"
+fi
 
 cat <<SUMMARY
 
@@ -505,6 +642,7 @@ $(ok "VibeMaxx host is set up.")
   Health      : http://${BIND}:${PORT}/healthz -> ${HEALTH}
   Installed   : ${INSTALL_DIR}   (release ${VERSION}, ${PLATFORM})
   Projects    : ${PROJECTS_DIR}   (clone repos here; agents can read/write here)
+  Agent access: ${ACCESS}
 
   Connect from the desktop app  (Settings → Connections → Host connection):
     URL   : ${PUBLIC_URL}
@@ -543,3 +681,14 @@ cat <<TIPS
   Remove     : sudo bash install.sh --uninstall
 
 TIPS
+
+if [ -f "${SUDOERS_FILE}" ]; then
+  cat <<NOTE
+$(warn "Agents on this box can become root (${SUDOERS_FILE}, NOPASSWD).")
+   That is what lets them apt-install and write outside \$HOME — and it means a leaked host
+   token is root on this machine. Keep the token secret, keep the daemon off the public
+   internet (--tailscale, or --domain for TLS), and prefer a VPS dedicated to this.
+   Undo with:  sudo rm ${SUDOERS_FILE}   (or re-run with --no-agent-sudo)
+
+NOTE
+fi
