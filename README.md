@@ -96,6 +96,9 @@ Windows-specific behavior worth knowing:
 - **The service runs as your user account** (default). You're asked for your Windows password
   once at first install — Windows' service manager stores it; the installer never writes it to
   disk. This is what lets agent CLIs and their sign-ins under your profile work unchanged.
+  Enter the account **password** — a Windows Hello **PIN won't work**, and machines signed in
+  with a Microsoft account need the **Microsoft account password**. (The installer verifies it
+  up front, and repairs the service logon in place if the service fails to start.)
   `-ServiceAccount LocalSystem` avoids the prompt, but agents then run as SYSTEM with an empty
   profile and every agent needs re-authenticating.
 - **Agents install the normal Windows way** — `npm install -g @anthropic-ai/claude-code` in any
