@@ -373,7 +373,19 @@ if ($npmCmd) {
   $p = (& npm config get prefix 2>$null | Select-Object -First 1)
   if ($p) { $npmPrefix = $p }
 }
-$svcPath = "$npmPrefix;$env:USERPROFILE\.local\bin;%PATH%"
+# git is what the repo/clone/push channels shell out to. The trailing %PATH% below expands to
+# the MACHINE PATH at service start, but recent Git-for-Windows installers default to a
+# PER-USER install (git on the user PATH only) - invisible to the service, so clones fail with
+# "Install Git...". Resolve git's actual dir now and bake it in; also fold in the installing
+# user's User PATH so other per-user tools resolve too. (git is a real .exe, safe on PATH -
+# unlike npm .cmd shims, which is why agent bins are prepended, not run by bare name.)
+$svcPathParts = @($npmPrefix, "$env:USERPROFILE\.local\bin")
+$gitCmd = Get-Command git.exe -ErrorAction SilentlyContinue
+if ($gitCmd) { $svcPathParts += (Split-Path $gitCmd.Source) }
+else { Warn2 "git not found on PATH - repo MaxxSpaces (clone/push/pull) will fail until Git for Windows is installed. Re-run this installer afterward." }
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($userPath) { $svcPathParts += $userPath.Trim(";") }
+$svcPath = ($svcPathParts -join ";") + ";%PATH%"
 
 $svcUser = "$env:USERDOMAIN\$env:USERNAME"
 if ($ServiceCredential) {
