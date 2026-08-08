@@ -598,6 +598,16 @@ if (-not $svcExists -and $ServiceAccount -eq "CurrentUser") {
   Say "Service already installed - config refreshed (picked up on start)"
 }
 
+# --- 7b. Boot resilience (set via sc.exe - authoritative regardless of WinSW XML) --------------
+# When bound to a Tailscale/VPN IP, delay the auto-start so the tailnet adapter exists before
+# the daemon binds (belt-and-suspenders with the daemon's own bind-retry). Always widen the
+# SCM crash-recovery beyond WinSW's default so a transient boot failure keeps retrying instead
+# of latching "stopped".
+if ($TailscaleRequested) {
+  & sc.exe config $ServiceName start= delayed-auto | Out-Null
+}
+& sc.exe failure $ServiceName reset= 60 actions= restart/5000/restart/15000/restart/30000 | Out-Null
+
 # --- 8. Firewall -------------------------------------------------------------------------------
 if ($Bind -ne "127.0.0.1" -and -not $NoFirewall) {
   Say "Adding firewall rule for TCP $Port"
