@@ -1,14 +1,16 @@
 # vibemaxx-host
 
 One-line installer for the **VibeMaxx host daemon** — run your agent/terminal sessions on an
-always-on VPS so they survive your local machine sleeping or shutting off. Your VibeMaxx desktop
-app connects to the host over WebSocket ("Connected mode").
+always-on box (a Linux VPS, or a Windows machine) so they survive your local machine sleeping
+or shutting off. Your VibeMaxx desktop app connects to the host over WebSocket ("Connected
+mode").
 
-This repo contains **only the installer**. The daemon ships as a self-contained **release
-tarball** (the built daemon + its native modules + a bundled Node runtime) attached to this
-repo's [Releases](https://github.com/elliotnex/vibemaxx-host/releases). The installer downloads
-it and wires up a systemd service — your server **runs no compiler**, and only pulls in npm if
-you opt to install agent CLIs (see [Installing agents](#installing-agents-on-the-host)).
+This repo contains **only the installers**. The daemon ships as a self-contained **release
+artifact** (the built daemon + its native modules + a bundled Node runtime) attached to this
+repo's [Releases](https://github.com/elliotnex/vibemaxx-host/releases) — a tarball for Linux,
+a zip for Windows. The installer downloads it and wires up a service (systemd on Linux, a
+WinSW Windows service on Windows) — your server **runs no compiler and no npm**, unless you
+opt to install agent CLIs (see [Installing agents](#installing-agents-on-the-host)).
 
 Already installed and hitting permission errors inside sessions? See
 [Agent access on the box](#agent-access-on-the-box) — one script unlocks an existing install.
@@ -64,6 +66,55 @@ ssh -N -L 8765:127.0.0.1:8765 <user>@<your-vps>
 # app → URL: ws://127.0.0.1:8765   Token: (printed by the installer)
 ```
 
+## Install on Windows
+
+The daemon also runs on a Windows box — **64-bit Windows 10 1809 / Windows Server 2019 or
+newer** (any edition, Home included). From an **elevated** PowerShell:
+
+```powershell
+# RECOMMENDED — private + encrypted via Tailscale (install Tailscale + sign in on the box first):
+iex "& { $(irm https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/install.ps1) } -Tailscale"
+
+# Loopback only — reach it from this machine or an SSH tunnel:
+irm https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/install.ps1 | iex
+```
+
+Prefer to read it before running? Download, then run:
+
+```powershell
+irm https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/install.ps1 -OutFile install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Tailscale
+```
+
+It downloads `vibemaxx-host-win-x64.zip` from Releases (checksum-verified), extracts it to
+`C:\VibeMaxx\Host`, and installs a `vibemaxx-host` Windows service (WinSW, hash-pinned) with
+restart-on-crash and rolling logs. Like the Linux install, the zip bundles its own Node
+runtime — no system Node, npm, or compiler is needed.
+
+Windows-specific behavior worth knowing:
+
+- **The service runs as your user account** (default). You're asked for your Windows password
+  once at first install — Windows' service manager stores it; the installer never writes it to
+  disk. This is what lets agent CLIs and their sign-ins under your profile work unchanged.
+  `-ServiceAccount LocalSystem` avoids the prompt, but agents then run as SYSTEM with an empty
+  profile and every agent needs re-authenticating.
+- **Agents install the normal Windows way** — `npm install -g @anthropic-ai/claude-code` in any
+  terminal, or the desktop app's in-app **Install** button (in Connected mode the app resolves
+  the Windows install command for the host and runs it there).
+- **Keep the box awake.** Windows sleeps by default, which suspends every hosted session:
+  `powercfg /change standby-timeout-ac 0`.
+- The bearer token lives in the service config under `C:\VibeMaxx\Host\svc`, ACL-restricted to
+  Administrators/SYSTEM/the service account (the chmod-600 analog).
+- Manage with `Start-Service` / `Stop-Service` / `Restart-Service vibemaxx-host`; logs land in
+  `C:\VibeMaxx\Host\logs`; device tokens via `C:\VibeMaxx\Host\vibemaxx-host.cmd tokens add
+  "Elliot's iPhone"`.
+- Update by re-running the installer (token, service registration, and data are kept).
+  Uninstall with `-Uninstall` (add `-Purge` to also delete the install dir and data).
+- Options mirror the Linux flags where they apply: `-Tailscale`, `-Bind`, `-Port`, `-Token`,
+  `-GitHubToken`, `-Version <tag>`, `-NoService`, `-NoFirewall`. With `-Tailscale`, the
+  firewall rule is scoped to the tailnet (100.64.0.0/10) and the service waits for Tailscale
+  at boot.
+
 ## Installing agents on the host
 
 Agent sessions run on the **VPS**, so the agent CLIs must be installed there — and with the
@@ -105,7 +156,8 @@ also works (in Connected mode it runs the Linux installer on the host).
 
 It is **idempotent** — re-run it to update to the latest release; the token and data are preserved.
 
-> **Supported architectures:** `linux-x64` (almost every VPS) and `linux-arm64`. The release
+> **Supported platforms:** `linux-x64` (almost every VPS), `linux-arm64`, and `win-x64`
+> (Windows 10 1809 / Server 2019+, via [install.ps1](#install-on-windows)). The release
 > bundles its own Node runtime, so there is no system-Node version to match.
 
 ## Options
