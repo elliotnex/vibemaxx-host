@@ -85,7 +85,10 @@ $WinSWSha256 = "05b82d46ad331cc16bdc00de5c6332c1ef818df8ceefcd49c726553209b3a0da
 function Say([string]$msg)  { Write-Host "==> $msg" -ForegroundColor Cyan }
 function Ok2([string]$msg)  { Write-Host "+ $msg" -ForegroundColor Green }
 function Warn2([string]$msg) { Write-Host "!  $msg" -ForegroundColor Yellow }
-function Die([string]$msg)  { Write-Host "x  $msg" -ForegroundColor Red; exit 1 }
+# NEVER `exit` in this script: the one-liner runs it via `iex` IN the user's console session,
+# where `exit` terminates the PowerShell window itself (before the error can be read). Errors
+# throw instead; the runner at the bottom prints them and only sets an exit code in file mode.
+function Die([string]$msg)  { throw $msg }
 
 function Test-Admin {
   $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -99,6 +102,30 @@ function Invoke-Robocopy([string]$src, [string]$dst) {
 }
 
 function XmlEscape([string]$s) { return [System.Security.SecurityElement]::Escape($s) }
+
+# Best-effort local check that the service-account password is right BEFORE handing it to
+# the SCM, which accepts anything and only fails at the first start with a logon failure
+# (error 1069). The two usual causes: a Windows Hello PIN is NOT the password, and
+# Microsoft-account machines need the MICROSOFT ACCOUNT password. Returns $true when
+# validation isn't possible (odd domain/MSA setups) so it never blocks a correct password.
+function Test-ServiceCredential([pscredential]$cred) {
+  try {
+    Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+    $nc = $cred.GetNetworkCredential()
+    $isLocal = (-not $nc.Domain) -or $nc.Domain -eq "." -or $nc.Domain -ieq $env:COMPUTERNAME
+    $ctxType = [System.DirectoryServices.AccountManagement.ContextType]::Domain
+    if ($isLocal) { $ctxType = [System.DirectoryServices.AccountManagement.ContextType]::Machine }
+    $ctx = New-Object System.DirectoryServices.AccountManagement.PrincipalContext($ctxType)
+    return $ctx.ValidateCredentials($nc.UserName, $nc.Password)
+  } catch {
+    return $true
+  }
+}
+
+# The whole install runs inside this function so early-outs can `return` (an `exit` here
+# would close the console when run via `irm | iex` — see the note on Die above). It reads
+# the script params from the enclosing scope.
+function Invoke-VibeMaxxHostInstall {
 
 $SvcDir  = Join-Path $InstallDir "svc"
 $LogsDir = Join-Path $InstallDir "logs"
@@ -127,7 +154,7 @@ if ($Uninstall) {
   } else {
     Ok2 "Uninstalled. Files ($InstallDir) and data were kept - re-run the installer to restore."
   }
-  exit 0
+  return
 }
 
 # --- Preflight -------------------------------------------------------------------------------
@@ -381,7 +408,7 @@ if ($NoService) {
   Write-Host ""
   Write-Host "  Connect URL : ws://${Bind}:$Port"
   Write-Host "  Token       : $Token"
-  exit 0
+  return
 }
 
 # --- 7. WinSW + service install --------------------------------------------------------------------
@@ -407,8 +434,19 @@ if (-not $svcExists -and $ServiceAccount -eq "CurrentUser") {
   # <allowservicelogon> makes WinSW grant the "Log on as a service" right.
   if (-not $ServiceCredential) {
     Say "The service will run as $svcUser - enter that account's password once."
-    $ServiceCredential = Get-Credential -UserName $svcUser -Message "Password for the vibemaxx-host service account"
-    if (-not $ServiceCredential) { Die "No credentials provided. Re-run, or use -ServiceAccount LocalSystem." }
+    Warn2 "The account PASSWORD - not a Windows Hello PIN. Microsoft-account sign-ins need the Microsoft account password."
+    $attempts = 0
+    while ($true) {
+      $ServiceCredential = Get-Credential -UserName $svcUser -Message "Password for the vibemaxx-host service account (NOT your PIN)"
+      if (-not $ServiceCredential) { Die "No credentials provided. Re-run, or use -ServiceAccount LocalSystem." }
+      $attempts++
+      if (Test-ServiceCredential $ServiceCredential) { break }
+      if ($attempts -ge 2) {
+        Warn2 "Could not verify that password locally - continuing anyway. If the service fails to start with a logon failure, it was wrong."
+        break
+      }
+      Warn2 "That password did not verify against this machine's $svcUser account - try again."
+    }
   }
   Write-ServiceXml $true $ServiceCredential.GetNetworkCredential().Password
   try {
@@ -441,7 +479,58 @@ if ($Bind -ne "127.0.0.1" -and -not $NoFirewall) {
 
 # --- 9. Start + health check ---------------------------------------------------------------------
 Say "Starting service $ServiceName"
-Start-Service -Name $ServiceName
+$started = $true
+try {
+  Start-Service -Name $ServiceName -ErrorAction Stop
+} catch {
+  $started = $false
+  Warn2 "The service was installed but failed to start: $($_.Exception.Message)"
+  $wrapperLog = Join-Path $LogsDir "$ServiceName.wrapper.log"
+  if (Test-Path $wrapperLog) {
+    Warn2 "Last lines of $wrapperLog :"
+    Get-Content $wrapperLog -Tail 8 | ForEach-Object { Write-Host "    $_" }
+  }
+}
+if (-not $started -and $ServiceAccount -eq "CurrentUser") {
+  # On a per-user service this is nearly always error 1069 (logon failure): the password
+  # given at install doesn't match the account. The SCM stores whatever it is handed and
+  # only checks at start. Fix it in place: re-prompt, update the stored credentials
+  # (Win32_Service.Change - the "log on as a service" right was already granted by WinSW),
+  # and start again.
+  Write-Host ""
+  Warn2 "This is usually a LOGON FAILURE: the password doesn't match $svcUser."
+  Warn2 "A Windows Hello PIN is NOT the password; Microsoft-account sign-ins need the Microsoft account password."
+  $svcCim = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'"
+  foreach ($try in 1..2) {
+    $retryCred = Get-Credential -UserName $svcUser -Message "Re-enter the password for $svcUser to fix the service logon"
+    if (-not $retryCred) { break }
+    $rnc = $retryCred.GetNetworkCredential()
+    $startName = ".\$($rnc.UserName)"
+    if ($rnc.Domain) { $startName = "$($rnc.Domain)\$($rnc.UserName)" }
+    Invoke-CimMethod -InputObject $svcCim -MethodName Change -Arguments @{ StartName = $startName; StartPassword = $rnc.Password } | Out-Null
+    try {
+      Start-Service -Name $ServiceName -ErrorAction Stop
+      $started = $true
+      Ok2 "Service credentials fixed - it's running."
+      break
+    } catch {
+      Warn2 "Still failing: $($_.Exception.Message)"
+    }
+  }
+}
+if (-not $started) {
+  Write-Host ""
+  Write-Host "  Fix it with ONE of:" -ForegroundColor Yellow
+  Write-Host "    1. services.msc -> VibeMaxx Host -> Properties -> Log On -> re-enter the account and"
+  Write-Host "       password -> OK, then run:  Start-Service $ServiceName"
+  Write-Host "    2. Re-run this installer (token and data are kept; it repairs the service in place)."
+  Write-Host "    3. Re-run with -ServiceAccount LocalSystem (no password prompt, but agents then run"
+  Write-Host "       as SYSTEM with an empty profile and each agent CLI needs signing in again)."
+  Write-Host "  If the account has NO password, Windows blocks service logon by default - set one,"
+  Write-Host "  or use option 3."
+  Write-Host "  The daemon itself can be sanity-checked anytime with: $SvcDir\run-foreground.cmd"
+  Die "Service $ServiceName did not start."
+}
 
 $health = "unreachable"
 foreach ($i in 1..20) {
@@ -479,3 +568,16 @@ if ($Bind -eq "127.0.0.1") {
 }
 Warn2 "Windows sleeps by default, which suspends every hosted session. To keep the box awake on AC power:"
 Write-Host "    powercfg /change standby-timeout-ac 0"
+
+}
+
+# Runner. Errors print in red and the console STAYS OPEN (vital for the `irm | iex` one-liner,
+# where the window would otherwise vanish before the message could be read). When run as a
+# file (powershell -File install.ps1), also report failure through the exit code.
+try {
+  Invoke-VibeMaxxHostInstall
+} catch {
+  Write-Host ""
+  Write-Host "x  $($_.Exception.Message)" -ForegroundColor Red
+  if ($PSCommandPath) { exit 1 }
+}
