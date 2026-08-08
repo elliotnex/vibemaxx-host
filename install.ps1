@@ -31,6 +31,11 @@
 # with an empty profile.
 #
 # Options:
+#   -InstallAgent <name>     Install an agent CLI on this box: codex, claude-code, grok,
+#                            antigravity, opencode, cursor. Repeatable / comma-separated.
+#                            npm-based agents pull in Node.js LTS automatically if missing
+#                            (the base install stays npm-free, like the Linux installer).
+#   -AgentNpm <package>      Install an arbitrary npm global package as an agent. Repeatable.
 #   -Tailscale               Bind the daemon to this machine's tailnet IP (private, encrypted;
 #                            Tailscale must already be installed and signed in).
 #   -Bind <ip>               Bind a specific interface (default 127.0.0.1; "tailscale" works too).
@@ -51,6 +56,8 @@
 
 [CmdletBinding()]
 param(
+  [string[]]$InstallAgent = @(),
+  [string[]]$AgentNpm = @(),
   [switch]$Tailscale,
   [string]$Bind = "127.0.0.1",
   [int]$Port = 8765,
@@ -78,6 +85,10 @@ $ErrorActionPreference = "Stop"
 $RepoSlug = "elliotnex/vibemaxx-host"
 $Asset = "vibemaxx-host-win-x64.zip"
 $ServiceName = "vibemaxx-host"
+# Node LTS MSI used ONLY when an npm-based agent is requested and npm is missing (the
+# vendored daemon bundles its own node.exe and never needs this). Matches the bundled
+# runtime's version line.
+$NodeMsiUrl = "https://nodejs.org/dist/v24.14.0/node-v24.14.0-x64.msi"
 $WinSWUrl = "https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe"
 # SHA-256 of the official WinSW v2.12.0 x64 release asset; the download is refused on mismatch.
 $WinSWSha256 = "05b82d46ad331cc16bdc00de5c6332c1ef818df8ceefcd49c726553209b3a0da"
@@ -102,6 +113,76 @@ function Invoke-Robocopy([string]$src, [string]$dst) {
 }
 
 function XmlEscape([string]$s) { return [System.Security.SecurityElement]::Escape($s) }
+
+# Agent CLIs the desktop app offers, by key -> binary/kind/payload. Mirrors the app's
+# runtimePresets WINDOWS install commands, the way install.sh's agent_spec mirrors the
+# Linux ones. Vendor .ps1 installers are downloaded to a file and run from a temp cwd
+# (never piped) so they can't eat their own script on stdin.
+function Resolve-AgentSpec([string]$name) {
+  switch -Regex ($name.ToLowerInvariant().Trim()) {
+    "^codex$"                 { return @{ binary = "codex";        kind = "npm"; payload = "@openai/codex" } }
+    "^(claude-code|claude)$"  { return @{ binary = "claude";       kind = "npm"; payload = "@anthropic-ai/claude-code" } }
+    "^opencode$"              { return @{ binary = "opencode";     kind = "npm"; payload = "opencode-ai" } }
+    "^(grok|grok-build)$"     { return @{ binary = "grok";         kind = "ps1"; payload = "https://x.ai/cli/install.ps1" } }
+    "^(antigravity|agy)$"     { return @{ binary = "agy";          kind = "ps1"; payload = "https://antigravity.google/cli/install.ps1" } }
+    "^(cursor|cursor-agent)$" { return @{ binary = "cursor-agent"; kind = "ps1"; payload = "https://cursor.com/install" } }
+  }
+  return $null
+}
+
+# npm is needed only for npm-based agents; the base install never uses it (the daemon
+# bundles its own node.exe). Install Node LTS on demand: winget when present, else the
+# pinned MSI. Returns $true when Node was installed by this call.
+function Install-NodeNpmIfMissing {
+  if (Get-Command npm -ErrorAction SilentlyContinue) { return $false }
+  Say "npm not found - installing Node.js LTS (needed only for agent CLI installs)"
+  $done = $false
+  if (Get-Command winget -ErrorAction SilentlyContinue) {
+    & winget install --id OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements
+    if ($LASTEXITCODE -eq 0) { $done = $true } else { Warn2 "winget install failed (exit $LASTEXITCODE) - falling back to the Node MSI" }
+  }
+  if (-not $done) {
+    $msi = Join-Path ([System.IO.Path]::GetTempPath()) "vibemaxx-node-lts-x64.msi"
+    Invoke-WebRequest -Uri $NodeMsiUrl -OutFile $msi -UseBasicParsing
+    $p = Start-Process msiexec.exe -ArgumentList "/i", "`"$msi`"", "/qn", "/norestart" -Wait -PassThru
+    Remove-Item $msi -Force -ErrorAction SilentlyContinue
+    if ($p.ExitCode -ne 0) { Die "Node.js MSI install failed (exit $($p.ExitCode))." }
+  }
+  # The machine PATH changed under this running process - rebuild it so npm resolves now.
+  $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+  if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+    Die "npm still not found after installing Node.js. Open a NEW elevated PowerShell and re-run."
+  }
+  return $true
+}
+
+# Codex's Windows sandbox refuses to initialize under an elevated token - and hosted
+# sessions ARE elevated when the service account is an administrator (service logons get
+# the unfiltered token; LocalSystem always is). This box is the sandbox (same posture as
+# the Linux VPS default), so turn Codex's own jail off. Create-if-missing only: an
+# existing config on a personal machine is never rewritten, just advised about.
+function Write-CodexConfig([string]$profileRoot) {
+  $codexDir = Join-Path $profileRoot ".codex"
+  $config = Join-Path $codexDir "config.toml"
+  if (Test-Path $config) {
+    $raw = Get-Content $config -Raw
+    if ($raw -match 'sandbox_mode\s*=\s*"danger-full-access"') { return }
+    Warn2 "$config exists without sandbox_mode = ""danger-full-access""."
+    Warn2 "Codex sessions on this host will fail to start their sandbox under the service's elevated token"
+    Warn2 "until you add:  approval_policy = ""never""  and  sandbox_mode = ""danger-full-access"""
+    return
+  }
+  New-Item -ItemType Directory -Force -Path $codexDir | Out-Null
+  @"
+# Written by the VibeMaxx host installer. This box is the sandbox: agents run under the
+# vibemaxx-host service, whose token is elevated (admin service account or LocalSystem),
+# and Codex's own Windows sandbox refuses to start when elevated - so it is turned off
+# here, matching the Linux VPS default posture.
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+"@ | Out-File -FilePath $config -Encoding ascii
+  Say "Disabled the Codex CLI sandbox in $config (the service's elevated token can't host it)"
+}
 
 # Best-effort local check that the service-account password is right BEFORE handing it to
 # the SCM, which accepts anything and only fails at the first start with a logon failure
@@ -399,6 +480,59 @@ if ($ServiceAccount -eq "CurrentUser" -and $svcUser -ne $installer) {
 }
 & icacls $LogsDir /grant "*S-1-5-18:(OI)(CI)M" | Out-Null
 if ($ServiceAccount -eq "CurrentUser") { & icacls $LogsDir /grant "${svcUser}:(OI)(CI)M" | Out-Null }
+
+# --- 6b. Codex posture + requested agent CLIs ---------------------------------------------------
+$agentProfileRoot = $env:USERPROFILE
+if ($ServiceAccount -eq "LocalSystem") { $agentProfileRoot = Join-Path $env:SystemRoot "System32\config\systemprofile" }
+Write-CodexConfig $agentProfileRoot
+
+$agentRequests = @()
+foreach ($name in ($InstallAgent | ForEach-Object { $_ -split "," })) {
+  if (-not $name.Trim()) { continue }
+  $spec = Resolve-AgentSpec $name
+  if (-not $spec) { Die "Unknown agent '$name'. Known: codex, claude-code, grok, antigravity, opencode, cursor (or use -AgentNpm <package>)." }
+  $agentRequests += $spec
+}
+foreach ($pkg in $AgentNpm) {
+  if ($pkg.Trim()) { $agentRequests += @{ binary = ""; kind = "npm"; payload = $pkg.Trim() } }
+}
+if ($agentRequests.Count -gt 0) {
+  if (($agentRequests | Where-Object { $_.kind -eq "npm" }).Count -gt 0) {
+    Install-NodeNpmIfMissing | Out-Null
+  }
+  foreach ($req in $agentRequests) {
+    Say "Installing agent: $($req.payload)"
+    if ($req.kind -eq "npm") {
+      & npm install -g $req.payload --no-audit --no-fund
+      if ($LASTEXITCODE -ne 0) { Die "npm install -g $($req.payload) failed (exit $LASTEXITCODE)." }
+    } else {
+      # Download-then-run from a scratch cwd (mirrors install.sh: piping feeds the vendor
+      # script its own text on stdin, and some installers drop files into the cwd).
+      $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("vm-agent-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+      New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
+      $vendor = Join-Path $tmpDir "vm-install.ps1"
+      Invoke-WebRequest -Uri $req.payload -OutFile $vendor -UseBasicParsing
+      Push-Location $tmpDir
+      try {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $vendor
+        if ($LASTEXITCODE -ne 0) { Die "Installer for $($req.payload) failed (exit $LASTEXITCODE)." }
+      } finally {
+        Pop-Location
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+      }
+    }
+    if ($req.binary) {
+      # Verify against the same dirs baked onto the service PATH, not just this shell's.
+      $probe = "$npmPrefix;$env:USERPROFILE\.local\bin;$env:Path"
+      $found = $false
+      foreach ($dir in ($probe -split ";")) {
+        if ($dir -and ((Test-Path (Join-Path $dir "$($req.binary).cmd")) -or (Test-Path (Join-Path $dir "$($req.binary).exe")))) { $found = $true; break }
+      }
+      if ($found) { Ok2 "$($req.binary) installed - new host sessions will resolve it (service PATH already includes the install dirs)" }
+      else { Warn2 "$($req.binary) not found on the service PATH dirs after install - check the installer output above." }
+    }
+  }
+}
 
 if ($NoService) {
   Say "Install complete (service skipped: -NoService)."

@@ -101,9 +101,25 @@ Windows-specific behavior worth knowing:
   up front, and repairs the service logon in place if the service fails to start.)
   `-ServiceAccount LocalSystem` avoids the prompt, but agents then run as SYSTEM with an empty
   profile and every agent needs re-authenticating.
-- **Agents install the normal Windows way** — `npm install -g @anthropic-ai/claude-code` in any
-  terminal, or the desktop app's in-app **Install** button (in Connected mode the app resolves
-  the Windows install command for the host and runs it there).
+- **Installing agents**: pass `-InstallAgent` (repeatable or comma-separated) — npm-based
+  agents pull in Node.js LTS automatically when npm is missing, the same on-demand way the
+  Linux installer does:
+
+  ```powershell
+  iex "& { $(irm https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/install.ps1) } -Tailscale -InstallAgent codex,claude-code"
+  ```
+
+  Re-running against an existing install just adds the agents (token, service, and data are
+  kept). Manual installs (`npm install -g @anthropic-ai/claude-code`) and the desktop app's
+  in-app **Install** button work too — the service PATH already covers the npm-global and
+  `.local\bin` install dirs. Known agents: `codex`, `claude-code`, `grok`, `antigravity`,
+  `opencode`, `cursor`; arbitrary npm packages via `-AgentNpm <package>`.
+- **Codex on Windows hosts**: hosted sessions run under the service's token, which is
+  elevated (an admin account's service logon is unfiltered; LocalSystem always is) — and
+  Codex's own Windows sandbox refuses to start when elevated ("cannot set up the sandbox").
+  The installer writes `~/.codex/config.toml` with `sandbox_mode = "danger-full-access"`
+  (box-is-the-sandbox, the same posture as the Linux VPS default) when no config exists yet;
+  if you already have one, add that line plus `approval_policy = "never"` yourself.
 - **Keep the box awake.** Windows sleeps by default, which suspends every hosted session:
   `powercfg /change standby-timeout-ac 0`.
 - The bearer token lives in the service config under `C:\VibeMaxx\Host\svc`, ACL-restricted to
