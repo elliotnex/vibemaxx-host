@@ -1,16 +1,16 @@
 # vibemaxx-host
 
 One-line installer for the **VibeMaxx host daemon** — run your agent/terminal sessions on an
-always-on box (a Linux VPS, or a Windows machine) so they survive your local machine sleeping
-or shutting off. Your VibeMaxx desktop app connects to the host over WebSocket ("Connected
-mode").
+always-on box (a Linux VPS, a Mac, or a Windows machine) so they survive your local machine
+sleeping or shutting off. Your VibeMaxx desktop app connects to the host over WebSocket
+("Connected mode").
 
 This repo contains **only the installers**. The daemon ships as a self-contained **release
 artifact** (the built daemon + its native modules + a bundled Node runtime) attached to this
-repo's [Releases](https://github.com/elliotnex/vibemaxx-host/releases) — a tarball for Linux,
-a zip for Windows. The installer downloads it and wires up a service (systemd on Linux, a
-WinSW Windows service on Windows) — your server **runs no compiler and no npm**, unless you
-opt to install agent CLIs (see [Installing agents](#installing-agents-on-the-host)).
+repo's [Releases](https://github.com/elliotnex/vibemaxx-host/releases) — a tarball for Linux
+and macOS, a zip for Windows. The installer downloads it and wires up a service (systemd on
+Linux, launchd on macOS, a WinSW service on Windows) — your server **runs no compiler and no
+npm**, unless you opt to install agent CLIs (see [Installing agents](#installing-agents-on-the-host)).
 
 Already installed and hitting permission errors inside sessions? See
 [Agent access on the box](#agent-access-on-the-box) — one script unlocks an existing install.
@@ -65,6 +65,51 @@ Open an SSH tunnel from your laptop, then connect the app to the local end:
 ssh -N -L 8765:127.0.0.1:8765 <user>@<your-vps>
 # app → URL: ws://127.0.0.1:8765   Token: (printed by the installer)
 ```
+
+## Install on macOS
+
+The daemon also runs on a Mac — as a **launchd** service that starts at boot, runs **as you**,
+and restarts on crash. Run with sudo (it installs a LaunchDaemon; the daemon itself runs under
+your account so agent CLIs and their sign-ins work unchanged):
+
+```bash
+# RECOMMENDED — private + encrypted via Tailscale (install Tailscale + sign in on the Mac first):
+curl -fsSL https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/install-macos.sh | sudo bash -s -- --tailscale
+
+# Loopback only — reach it from this Mac or an SSH tunnel:
+curl -fsSL https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/install-macos.sh | sudo bash
+```
+
+Prefer to read it first? Download, then run:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/elliotnex/vibemaxx-host/main/install-macos.sh
+sudo bash install-macos.sh --tailscale
+```
+
+It downloads `vibemaxx-host-darwin-arm64.tar.gz` (Apple Silicon) or `-x64` (Intel) from
+Releases, checksum-verifies it, installs to `/usr/local/vibemaxx-host`, and loads a
+`com.vibemaxx.host` LaunchDaemon. Like Linux, the tarball bundles its own Node runtime — no
+system Node, npm, or compiler needed.
+
+macOS specifics:
+
+- **Runs as your user, at boot.** A LaunchDaemon with `UserName` set starts at boot and
+  survives logout (a LaunchAgent would only run while you're logged into the GUI). The bearer
+  token lives in `~/.vibemaxx-host/host.env` (chmod 600), sourced by the launcher — not in the
+  world-readable plist.
+- **Keep it awake.** Macs sleep by default, suspending every hosted session:
+  `sudo pmset -c sleep 0 disablesleep 1`.
+- **Agents / git**: install via Homebrew or npm as your user (`brew install git`,
+  `npm install -g @anthropic-ai/claude-code`); the service PATH already includes Homebrew, your
+  npm-global bin, and git's directory. The in-app **Install** button also works (the app
+  resolves the macOS install command for the host).
+- **Codex**: the installer writes `~/.codex/config.toml` with `sandbox_mode = "danger-full-access"`
+  (box-is-the-sandbox) when no config exists.
+- **Manage**: `sudo launchctl kickstart -k system/com.vibemaxx.host` (restart),
+  `sudo launchctl bootout system /Library/LaunchDaemons/com.vibemaxx.host.plist` (stop); logs in
+  `~/.vibemaxx-host/logs`. Update by re-running the installer; uninstall with `--uninstall`
+  (add `--purge` to delete data).
 
 ## Install on Windows
 
@@ -175,7 +220,8 @@ also works (in Connected mode it runs the Linux installer on the host).
 
 It is **idempotent** — re-run it to update to the latest release; the token and data are preserved.
 
-> **Supported platforms:** `linux-x64` (almost every VPS), `linux-arm64`, and `win-x64`
+> **Supported platforms:** `linux-x64` (almost every VPS), `linux-arm64`, `darwin-arm64` +
+> `darwin-x64` (macOS, via [install-macos.sh](#install-on-macos)), and `win-x64`
 > (Windows 10 1809 / Server 2019+, via [install.ps1](#install-on-windows)). The release
 > bundles its own Node runtime, so there is no system-Node version to match.
 
